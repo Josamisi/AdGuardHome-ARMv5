@@ -18,26 +18,49 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Get latest stable AdGuard Home version
+      - name: Get latest stable version
         id: version
         run: |
-          VERSION=$(curl -fsSL \
-            https://api.github.com/repos/AdguardTeam/AdGuardHome/releases/latest \
-            | jq -r '.tag_name')
+          RELEASE=$(curl -fsSL \
+            https://api.github.com/repos/AdguardTeam/AdGuardHome/releases/latest)
+
+          VERSION=$(echo "$RELEASE" | jq -r '.tag_name')
+          URL=$(echo "$RELEASE" | jq -r \
+            '.assets[] | select(.name == "AdGuardHome_linux_armv5.tar.gz") | .browser_download_url')
+
+          test -n "$VERSION"
+          test -n "$URL"
+          test "$URL" != "null"
+
           echo "version=${VERSION#v}" >> "$GITHUB_OUTPUT"
-          echo "AdGuard Home version: $VERSION"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Download official ARMv5 binary
+        run: |
+          mkdir -p dist
+          curl -fL --retry 3 \
+            "${{ steps.version.outputs.url }}" \
+            -o /tmp/adguardhome.tar.gz
+
+          tar -xzf /tmp/adguardhome.tar.gz -C /tmp
+
+          find /tmp/AdGuardHome -type f -name AdGuardHome \
+            -exec cp {} dist/AdGuardHome \;
+
+          test -s dist/AdGuardHome
+          cp /etc/ssl/certs/ca-certificates.crt dist/ca-certificates.crt
+
+      - name: Set lowercase image name
+        id: image
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/adguardhome-armv5"
+          echo "name=$IMAGE" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      - name: Set lowercase image name
-        id: image
-        run: |
-          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/adguardhome-armv5"
-          echo "name=$IMAGE" >> "$GITHUB_OUTPUT"      
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -52,8 +75,6 @@ jobs:
           context: .
           platforms: linux/arm/v5
           push: true
-          build-args: |
-            VERSION=${{ steps.version.outputs.version }}
           tags: |
             ${{ steps.image.outputs.name }}:latest
             ${{ steps.image.outputs.name }}:${{ steps.version.outputs.version }}
