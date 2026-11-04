@@ -11,13 +11,14 @@ permissions:
   packages: write
 
 jobs:
-  build:
+  check-version:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      url: ${{ steps.version.outputs.url }}
+      build: ${{ steps.check.outputs.build }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Get latest stable version
         id: version
         run: |
@@ -30,16 +31,45 @@ jobs:
 
           test -n "$VERSION"
           test -n "$URL"
+          test "$VERSION" != "null"
           test "$URL" != "null"
 
           echo "version=${VERSION#v}" >> "$GITHUB_OUTPUT"
           echo "url=$URL" >> "$GITHUB_OUTPUT"
 
+      - name: Check if version already exists in GHCR
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/adguardhome-armv5"
+
+          if docker manifest inspect "$IMAGE:$VERSION" >/dev/null 2>&1; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "Version $VERSION already published. No build needed."
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "New version $VERSION detected. Build required."
+          fi
+
+  build:
+    needs: check-version
+    if: needs.check-version.outputs.build == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download official ARMv5 binary
+        env:
+          URL: ${{ needs.check-version.outputs.url }}
         run: |
           mkdir -p dist
+
           curl -fL --retry 3 \
-            "${{ steps.version.outputs.url }}" \
+            "$URL" \
             -o /tmp/adguardhome.tar.gz
 
           tar -xzf /tmp/adguardhome.tar.gz -C /tmp
@@ -48,7 +78,9 @@ jobs:
             -exec cp {} dist/AdGuardHome \;
 
           test -s dist/AdGuardHome
-          cp /etc/ssl/certs/ca-certificates.crt dist/ca-certificates.crt
+
+          cp /etc/ssl/certs/ca-certificates.crt \
+            dist/ca-certificates.crt
 
       - name: Set lowercase image name
         id: image
@@ -77,7 +109,7 @@ jobs:
           push: true
           tags: |
             ${{ steps.image.outputs.name }}:latest
-            ${{ steps.image.outputs.name }}:${{ steps.version.outputs.version }}
+            ${{ steps.image.outputs.name }}:${{ needs.check-version.outputs.version }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.version=${{ needs.check-version.outputs.version }}
